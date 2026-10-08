@@ -1,0 +1,168 @@
+#Requires AutoHotkey v2.0
+#SingleInstance Off
+#Warn All, StdOut
+#Include "%A_ScriptDir%\..\lib\keybindings.ahk"
+
+; =============================================================================
+; keybindings-check.ahk - helper, persistence and ownership checks
+; =============================================================================
+; Uses a unique temporary directory and mutex names. No feature shortcuts are
+; enabled, no keyboard hooks or recording GUI are installed, and the layer
+; service is never contacted. The fake peer publishes claims only.
+; This is not a physical-input or multi-process race test.
+; =============================================================================
+
+try {
+    checkCount := KB_Check.Run()
+    FileAppend("PASS: " checkCount " keybinding, persistence and ownership assertions.`n", "*")
+    ExitApp 0
+}
+catch Error as checkFailure {
+    FileAppend("FAIL: " checkFailure.Message "`n" checkFailure.Stack "`n", "**")
+    ExitApp 1
+}
+
+class KB_Check {
+    static Count := 0
+
+    static Assert(condition, message) {
+        this.Count += 1
+        if !condition
+            throw Error(message)
+    }
+
+    static Throws(callback, message, expectedClass := "") {
+        this.Count += 1
+        try callback.Call()
+        catch Error as expectedError {
+            if expectedClass != "" && Type(expectedError) != expectedClass
+                throw Error(message " (wrong exception: " Type(expectedError) ")")
+            return
+        }
+        throw Error(message " (expected rejection)")
+    }
+
+    static Run() {
+        this.Assert(!IsObject(Keybindings.Parse("")), "empty binding clears a slot")
+        for pair in [["Ctrl + Alt + J", "^!j"], ["Alt + Ctrl + J", "!^j"],
+            ["Esc", "Escape"], ["Caps + J", "CapsLock + J"],
+            ["Control + Shift + F9", "^+F9"]] {
+            this.Assert(Keybindings.Parse(pair[1]).signature = Keybindings.Parse(pair[2]).signature,
+                "equivalent binding spellings: " pair[1])
+        }
+        for text in ["J", "Caps + J", "Pause + Ctrl + J", "Shift + F24", "Win + XButton1",
+            "Ctrl + WheelDown", "Alt + sc024", "Caps + Shift + J"] {
+            binding := Keybindings.Parse(text)
+            this.Assert(Keybindings.Parse(binding.signature).signature = binding.signature,
+                "saved binding round trip: " text)
+        }
+        this.Assert(Keybindings.Parse("Ctrl + Alt + Shift + Win + F9").modifiers = 15, "all modifiers")
+        this.Assert(Keybindings.Parse("Pause + Ctrl + J").layer = "pause", "Pause layer")
+        this.Assert(Keybindings.Parse("Caps + Alt + J").modifiers = 2, "adapter Alt mask")
+        this.Assert(Keybindings.Parse("Caps + Shift + J").modifiers = 4, "adapter Shift mask")
+        this.Assert(Keybindings.Parse("XButton1").mouse, "ordinary mouse button")
+        this.Assert(Keybindings.Parse("WheelUp").wheel, "wheel has complete press events")
+        this.Assert(Keybindings.Parse("J").signature != Keybindings.Parse("Caps + J").signature,
+            "normal and layered bindings have distinct identifiers")
+        normalIndex := Map(Keybindings.Parse("J").signature, "normal J")
+        capsIndex := Map(Keybindings.Parse("Caps + J").signature, "Caps J")
+        this.Assert(Keybindings.ConflictingSignature(Keybindings.Parse("Caps + J"), normalIndex) != "",
+            "global normal binding overlaps a matching layer binding")
+        this.Assert(Keybindings.ConflictingSignature(Keybindings.Parse("J"), capsIndex) != "",
+            "overlap detection is symmetric")
+        this.Assert(Keybindings.ConflictingSignature(Keybindings.Parse("Pause + J"), capsIndex) = "",
+            "Caps and Pause do not overlap")
+        this.Assert(Keybindings.ConflictingSignature(Keybindings.Parse("Ctrl + J"), normalIndex) = "",
+            "exact modifier masks do not overlap")
+        for text in ["CapsLock", "Pause", "Ctrl", "LShift", "Caps + Pause + J", "Ctrl + Ctrl + J",
+            "*j", "~j", "<^j", "j & k", "Caps + XButton1", "Pause + WheelUp", "Joy1",
+            "sc000", "sc200", "normal|99|sc024", "Win + L", "Ctrl + Alt + Delete"]
+            this.Throws(() => Keybindings.Parse(text), "unsupported/reserved binding: " text)
+        this.Assert(Keybindings.Symbols(15) = "^!+#", "modifier symbol ordering")
+        this.Throws(() => Keybindings.Id("../bad"), "invalid owner ID")
+        this.Throws(() => Keybindings.Id("CON"), "reserved owner ID")
+        this.Throws(() => KB_Manifest.Decode("[a]`nx=1`nx=2`n"), "duplicate manifest key")
+        this.Throws(() => KB_Manifest.Decode("[a]`nx=1`n[a]`ny=2`n"), "duplicate manifest section")
+        this.Throws(() => KB_Manifest.Validate(Map("meta", Map("schema", "99"))), "unknown schema")
+
+        directory := A_Temp "\nroj-keybindings-check-" DllCall("GetCurrentProcessId", "uint")
+            . "-" Random(1, 0x7FFFFFFF)
+        manager := 0
+        fakeMutex := 0
+        try {
+            manager := Keybindings("checks", "keybindings checks", {directory: directory})
+            manager.AddAction("test.one", "first action", (*) => 0)
+            manager.AddAction("test.two", "second action", (*) => 0)
+            legacy := Map("meta", Map("schema", "1", "id", "checks", "name", "keybindings checks",
+                    "profile", "layered", "pid", "0", "hwnd", "0"),
+                "profile:layered", Map("test.two", "1`t`t"),
+                "profile:standalone", Map("test.two", "0`t`t"))
+            DirCreate directory
+            KB_Manifest.WriteAtomic(manager.path, legacy)
+            manager.Start()
+            this.Assert(FileExist(manager.path) != "", "settings snapshot created")
+            saved := KB_Manifest.Read(manager.path)
+            KB_Manifest.Validate(saved)
+            this.Assert(saved.Has("bindings"), "single configuration section persisted")
+            this.Assert(manager.GetConfiguration()["test.two"].enabled,
+                "the selected legacy layered profile migrated")
+            this.Assert(!saved.Has("profile:standalone") && !saved.Has("profile:layered"),
+                "legacy profile sections retired after successful migration")
+            this.Assert(!saved["meta"].Has("profile"), "no profile selector persisted")
+            this.Assert(saved["claims"].Count = 0, "unbound actions claim no keys")
+
+            clone := manager.GetConfiguration()
+            clone["test.one"].enabled := false
+            this.Assert(manager.GetConfiguration()["test.one"].enabled,
+                "configuration is a defensive copy")
+            manager.Apply(clone)
+            this.Assert(!manager.GetConfiguration()["test.one"].enabled,
+                "single configuration applied")
+            this.Assert(KB_Manifest.Read(manager.path)["bindings"]["test.one"] = "0`t`t",
+                "single configuration saved")
+            binding := Keybindings.Parse("Ctrl + Alt + F9")
+            peer := Map("meta", Map("schema", "1", "id", "fake-peer", "name", "Jørn – テスト",
+                    "pid", "0", "hwnd", "0"),
+                "configured", Map(binding.signature, "another action"),
+                "claims", Map(binding.signature, "another action"))
+            peerPath := directory "\fake-peer.ini"
+            KB_Manifest.WriteAtomic(peerPath, peer)
+            this.Assert(KB_Manifest.Read(peerPath)["meta"]["name"] = "Jørn – テスト", "UTF-8 round trip")
+            fakeMutex := DllCall("CreateMutexW", "ptr", 0, "int", false,
+                "str", manager._OwnerMutexName("fake-peer"), "ptr")
+            this.Assert(fakeMutex != 0, "fake peer presence signal")
+            this.Assert(manager._OwnerAlive("fake-peer"), "running owner is detected")
+            draft := manager.GetConfiguration()
+            draft["test.one"].enabled := true
+            draft["test.one"].bindings[1] := binding.signature
+            before := FileRead(manager.path, "UTF-8")
+            this.Throws(() => manager.Apply(draft), "running peer blocks a collision", "Error")
+            this.Assert(FileRead(manager.path, "UTF-8") = before, "rejected edit leaves disk unchanged")
+            this.Assert(!manager.GetConfiguration()["test.one"].enabled, "rejected edit retains prior settings")
+            this.Assert(manager.routes.Length = 0, "rejected edit activates no shortcuts")
+            DllCall("CloseHandle", "ptr", fakeMutex)
+            fakeMutex := 0
+            this.Assert(!manager._OwnerAlive("fake-peer"), "closed owner loses its active claim")
+            this.Throws(() => manager.Apply(draft), "inactive peer produces saved warning", "KB_SavedConflict")
+            FileDelete peerPath
+            draft["test.two"].enabled := true
+            draft["test.two"].bindings[1] := binding.signature
+            this.Throws(() => manager.Apply(draft), "duplicate bindings within one script", "Error")
+            this.Assert(manager.routes.Length = 0, "local conflict registers no shortcuts")
+
+            manager.Stop()
+            this.Assert(!manager._OwnerAlive("checks"), "Stop releases owner presence")
+            this.Assert(FileExist(manager.path) != "", "configured preferences survive Stop")
+            this.Assert(this.Count >= 50, "expected test cases executed")
+        }
+        finally {
+            if IsObject(manager)
+                manager.Stop()
+            if fakeMutex
+                DllCall("CloseHandle", "ptr", fakeMutex)
+            if DirExist(directory)
+                DirDelete directory, true
+        }
+        return this.Count
+    }
+}
