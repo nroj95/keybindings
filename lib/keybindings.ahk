@@ -1,8 +1,8 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 
 ; =============================================================================
 ; keybindings.ahk - reusable, opt-in keybinding manager for AutoHotkey v2
-; version: 0.2.0-preview.4 | settings/registry schema: 1 | layer protocol: 1
+; version: 0.2.0-preview.5 | settings/registry schema: 1 | layer protocol: 1
 ; =============================================================================
 ; responsibilities
 ;   - give actions stable IDs, two editable binding slots and one saved setup.
@@ -42,7 +42,7 @@
 ; =============================================================================
 
 class Keybindings {
-    static Version := "0.2.0-preview.4"
+    static Version := "0.2.0-preview.5"
     static Current := 0
 
     __New(ownerId, displayName, options := {}) {
@@ -86,6 +86,7 @@ class Keybindings {
         this.registryMutex := 0
         this.recording := 0
         this.externalCapture := false
+        this.paused := false
         this.gated := false
         this.rows := []
         this.visibleRows := []
@@ -209,6 +210,16 @@ class Keybindings {
         if !this.running || this.disposed
             throw Error("Start the manager before applying configuration.")
         this._Commit(configuration, true, acceptSavedConflicts)
+    }
+
+    ; Consumers can pause inputs for a module selector or power transition
+    ; without erasing enabled flags, releasing registry ownership or restarting.
+    SetPaused(paused := true) {
+        if this.disposed
+            return
+        this.paused := !!paused
+        if this.running
+            this._RefreshGate()
     }
 
     GetStatus() {
@@ -910,7 +921,7 @@ class Keybindings {
     }
 
     _RefreshGate() {
-        gated := IsObject(this.settings) || this.externalCapture || !this.running
+        gated := this.paused || IsObject(this.settings) || this.externalCapture || !this.running
         if gated = this.gated
             return
         this.gated := gated
