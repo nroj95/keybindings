@@ -104,6 +104,10 @@ class KB_Check {
             saved := KB_Manifest.Read(manager.path)
             KB_Manifest.Validate(saved)
             this.Assert(saved.Has("bindings"), "single configuration section persisted")
+            this.Assert(saved.Has("catalog"), "action catalog published")
+            this.Assert(saved["catalog"].Count = 2, "all actions published")
+            this.Assert(saved["catalog"]["test.one"] = "general`tfirst action",
+                "catalog preserves action category and label")
             this.Assert(manager.GetConfiguration()["test.two"].enabled,
                 "the selected legacy layered profile migrated")
             this.Assert(!saved.Has("profile:standalone") && !saved.Has("profile:layered"),
@@ -124,7 +128,13 @@ class KB_Check {
             peer := Map("meta", Map("schema", "1", "id", "fake-peer", "name", "Jørn – テスト",
                     "pid", "0", "hwnd", "0"),
                 "configured", Map(binding.signature, "another action"),
-                "claims", Map(binding.signature, "another action"))
+                "claims", Map(binding.signature, "another action"),
+                "catalog", Map(
+                    "peer.bound", "Window Cascade`tother action",
+                    "peer.empty", "Window Cascade`tno shortcut"),
+                "bindings", Map(
+                    "peer.bound", "1`t" binding.signature "`t",
+                    "peer.empty", "1`t`t"))
             peerPath := directory "\fake-peer.ini"
             KB_Manifest.WriteAtomic(peerPath, peer)
             this.Assert(KB_Manifest.Read(peerPath)["meta"]["name"] = "Jørn – テスト", "UTF-8 round trip")
@@ -132,6 +142,26 @@ class KB_Check {
                 "str", manager._OwnerMutexName("fake-peer"), "ptr")
             this.Assert(fakeMutex != 0, "fake peer presence signal")
             this.Assert(manager._OwnerAlive("fake-peer"), "running owner is detected")
+            participants := manager.DiscoverParticipants()
+            this.Assert(participants.Length = 2, "local and running peer discovered")
+            this.Assert(participants[1].id = "checks", "local owner listed first")
+            this.Assert(participants[1].actions.Length = 2, "local actions included")
+            this.Assert(!participants[1].actions[1].enabled, "local disabled state preserved")
+            this.Assert(participants[2].name = "Jørn – テスト", "peer name preserved")
+            this.Assert(participants[2].actions.Length = 2, "all peer actions discovered")
+            this.Assert(participants[2].actions[1].bindings[1] = binding.signature,
+                "peer shortcut preserved")
+            this.Assert(participants[2].actions[2].bindings[1] = "",
+                "unassigned peer action included")
+            displayed := Keybindings.DisplayRows(participants)
+            this.Assert(displayed.Length = 5, "enabled actions grouped by script")
+            this.Assert(displayed[1].label = "keybindings checks", "local script header")
+            this.Assert(displayed[3].label = "Jørn – テスト (view only)", "remote header is read-only")
+            this.Assert(displayed[4].id = "peer.bound", "remote action visible")
+            this.Assert(displayed[5].setting.bindings[1] = "", "unassigned action visible")
+            searched := Keybindings.DisplayRows(participants, "no shortcut")
+            this.Assert(searched.Length = 2 && searched[1].ownerId = "fake-peer",
+                "global search finds remote actions")
             draft := manager.GetConfiguration()
             draft["test.one"].enabled := true
             draft["test.one"].bindings[1] := binding.signature
@@ -143,6 +173,7 @@ class KB_Check {
             DllCall("CloseHandle", "ptr", fakeMutex)
             fakeMutex := 0
             this.Assert(!manager._OwnerAlive("fake-peer"), "closed owner loses its active claim")
+            this.Assert(manager.DiscoverParticipants().Length = 1, "offline peer excluded")
             this.Throws(() => manager.Apply(draft), "inactive peer produces saved warning", "KB_SavedConflict")
             FileDelete peerPath
             draft["test.two"].enabled := true

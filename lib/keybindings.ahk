@@ -206,6 +206,125 @@ class Keybindings {
     ; Returns a defensive copy of the single saved configuration.
     GetConfiguration() => this._CloneConfiguration(this.configuration)
 
+    ; Read-only discovery for the future multi-script configuration window.
+    ; The owning process remains authoritative for changes.
+    DiscoverParticipants() {
+        if !this.running || this.disposed
+            throw Error("Start Keybindings before discovering participants.")
+
+        participants := [{
+            id: this.id,
+            name: this.name,
+            alive: true,
+            actions: this._LocalCatalogSnapshot()
+        }]
+
+        previousCritical := this._Lock()
+        try {
+            for owner in this._Owners() {
+                ; Older clients without a catalog are not yet discoverable.
+                if !owner.alive || !owner.document.Has("catalog")
+                    continue
+
+                participants.Push({
+                    id: owner.id,
+                    name: owner.name,
+                    alive: true,
+                    actions: this._PublishedCatalogSnapshot(owner.document)
+                })
+            }
+        }
+        finally this._Unlock(previousCritical)
+
+        return participants
+    }
+
+    ; Build one category per owner, regardless of that owner's internal modules.
+    ; External rows remain read-only until owner-mediated updates are implemented.
+    static DisplayRows(participants, search := "") {
+        rows := []
+        search := StrLower(Trim(search))
+        for participant in participants {
+            matching := []
+            for action in participant.actions {
+                ; Module enablement belongs to the owning script.
+                if !action.enabled
+                    continue
+                searchable := participant.name " " action.id " " action.category " " action.label
+                for encoded in action.bindings {
+                    parsed := Keybindings.Parse(encoded)
+                    if IsObject(parsed)
+                        searchable .= " " parsed.label
+                }
+                if search != "" && !InStr(StrLower(searchable), search)
+                    continue
+                matching.Push({id: action.id, label: action.label,
+                    ownerId: participant.id, setting: action})
+            }
+            if !matching.Length
+                continue
+            heading := participant.name
+            if participant.id != participants[1].id
+                heading .= " (view only)"
+            rows.Push({id: "", label: heading, ownerId: participant.id})
+            for entry in matching
+                rows.Push(entry)
+        }
+        return rows
+    }
+    _LocalCatalogSnapshot() {
+        result := []
+        for actionId, action in this.actions {
+            setting := this.configuration[actionId]
+            result.Push({
+                id: actionId,
+                label: action.label,
+                category: action.category,
+                enabled: setting.enabled,
+                bindings: setting.bindings.Clone()
+            })
+        }
+        return result
+    }
+
+    _PublishedCatalogSnapshot(document) {
+        if !document.Has("bindings")
+            throw Error("Participant catalog has no bindings section.")
+
+        catalog := document["catalog"]
+        savedBindings := document["bindings"]
+        if catalog.Count > 128
+            throw Error("Participant catalog exceeds the action limit.")
+
+        result := []
+        for actionId, metadata in catalog {
+            Keybindings.Id(actionId)
+            fields := StrSplit(metadata, "`t")
+            if fields.Length != 2
+                throw Error("Invalid participant action metadata.")
+
+            Keybindings.Text(fields[1], 80)
+            Keybindings.Text(fields[2], 120)
+
+            if !savedBindings.Has(actionId)
+                throw Error("Participant action has no saved configuration: " actionId)
+
+            values := StrSplit(savedBindings[actionId], "`t")
+            if values.Length != 3 || (values[1] != "0" && values[1] != "1")
+                throw Error("Invalid participant binding configuration.")
+
+            slots := this._NormalizeSlots([values[2], values[3]])
+            result.Push({
+                id: actionId,
+                label: fields[2],
+                category: fields[1],
+                enabled: values[1] = "1",
+                bindings: slots
+            })
+        }
+        return result
+    }
+
     Apply(configuration, acceptSavedConflicts := false) {
         if !this.running || this.disposed
             throw Error("Start the manager before applying configuration.")
@@ -635,6 +754,10 @@ class Keybindings {
         for actionId, setting in configuration
             document["bindings"][actionId] := (setting.enabled ? "1" : "0")
                 . "`t" setting.bindings[1] "`t" setting.bindings[2]
+        ; Publish action metadata for future unified configuration views.
+        document["catalog"] := Map()
+        for actionId, action in this.actions
+            document["catalog"][actionId] := action.category "`t" action.label
         ; Retire the old profile sections on first successful save.
         for sectionName in ["profile:standalone", "profile:layered", "profile:default"]
             if document.Has(sectionName)
@@ -985,16 +1108,10 @@ class Keybindings {
             return
         }
 
-        ; Keep small module lists compact, while allowing a longer scrollable list.
-        categories := Map()
-        enabledActions := 0
-        for actionId, action in this.actions {
-            if !this.configuration[actionId].enabled
-                continue
-            enabledActions += 1
-            categories[action.category] := true
-        }
-        rowCount := Min(11, Max(4, enabledActions + categories.Count))
+        ; The combined list is grouped by script, while keeping the original
+        ; fixed footer, search box, native scrollbar and compact dimensions.
+        this.participants := this.DiscoverParticipants()
+        rowCount := Min(11, Max(4, Keybindings.DisplayRows(this.participants).Length))
         rowStartY := 48
         ; The scrollable rows end before the pinned bottom action bar.
         footerDividerY := rowStartY + rowCount * 35 + 8
@@ -1011,6 +1128,8 @@ class Keybindings {
         DllCall("SendMessageW", "ptr", searchBox.Hwnd, "uint", 0x1501,
             "uptr", 1, "str", "search...", "ptr")
         searchBox.OnEvent("Change", ObjBindMethod(this, "_SearchChanged"))
+        window.AddButton("x698 y12 w88 h28", "refresh").OnEvent("Click",
+            ObjBindMethod(this, "_RefreshParticipants"))
 
         this.visibleRows := []
         loop rowCount {
@@ -1033,7 +1152,7 @@ class Keybindings {
             " w24 h" (rowCount * 35) " +0x1") ; SBS_VERT
         ; Only the binding rows scroll. This separator and centered actions stay put.
         window.AddText("x22 y" footerDividerY " w752 h2 +0x10", "")
-        window.AddButton("x268 y" footerY " w140 h31", "reset all").OnEvent("Click",
+        window.AddButton("x268 y" footerY " w140 h31", "reset mine").OnEvent("Click",
             ObjBindMethod(this, "_ResetAll"))
         window.AddButton("x422 y" footerY " w130 h31", "done").OnEvent("Click",
             ObjBindMethod(this, "_RequestCloseSettings"))
@@ -1054,6 +1173,18 @@ class Keybindings {
         this.scrollPosition := 0
         this.wheelRemainder := 0
         this._RenderSettings()
+    }
+
+    _RefreshParticipants(*) {
+        if !IsObject(this.settings) || IsObject(this.recording)
+            return
+        try {
+            updated := this.DiscoverParticipants()
+            this.participants := updated
+            this._RenderSettings()
+        }
+        catch Error as participantRefreshError
+            MsgBox(participantRefreshError.Message, this.name " - could not refresh", "Icon!")
     }
 
     _WheelSettings(wParam, lParam, messageId, receiverHwnd) {
@@ -1122,34 +1253,10 @@ class Keybindings {
     _RenderSettings(*) {
         if !IsObject(this.settings)
             return
-        search := StrLower(Trim(this.settings["search"].Value))
-        categories := Map()
-        orderedCategories := []
-        for actionId, action in this.actions {
-            setting := this.configuration[actionId]
-            ; Enabled is owned by the supplying module, not this screen.
-            if !setting.enabled
-                continue
-            searchable := action.id " " action.category " " action.label
-            for encoded in setting.bindings {
-                parsed := Keybindings.Parse(encoded)
-                if IsObject(parsed)
-                    searchable .= " " parsed.label
-            }
-            if search != "" && !InStr(StrLower(searchable), search)
-                continue
-            if !categories.Has(action.category) {
-                categories[action.category] := []
-                orderedCategories.Push(action.category)
-            }
-            categories[action.category].Push(actionId)
-        }
-        this.rows := []
-        for categoryName in orderedCategories {
-            this.rows.Push({id: "", label: categoryName})
-            for actionId in categories[categoryName]
-                this.rows.Push({id: actionId, label: this.actions[actionId].label})
-        }
+        search := this.settings["search"].Value
+        ; Local changes appear immediately; remote snapshots refresh explicitly.
+        this.participants[1].actions := this._LocalCatalogSnapshot()
+        this.rows := Keybindings.DisplayRows(this.participants, search)
         maximum := Max(0, this.rows.Length - this.visibleRows.Length)
         this.scrollPosition := Min(Max(this.scrollPosition, 0), maximum)
         this.settingsScroll.Visible := maximum > 0
@@ -1168,28 +1275,33 @@ class Keybindings {
             position := this.scrollPosition + index
             visible := position <= this.rows.Length
             entry := visible ? this.rows[position] : 0
-            row.actionId := visible ? entry.id : ""
-            row.title.Visible := visible && entry.id != ""
-            row.categoryTitle.Visible := visible && entry.id = ""
-            row.primary.Visible := visible && entry.id != ""
-            row.secondary.Visible := visible && entry.id != ""
-            row.reset.Visible := visible && entry.id != ""
+            isAction := visible && entry.id != ""
+            isLocal := isAction && entry.ownerId = this.id
+            row.actionId := isLocal ? entry.id : ""
+            row.title.Visible := isAction
+            row.categoryTitle.Visible := visible && !isAction
+            row.primary.Visible := isAction
+            row.secondary.Visible := isAction
+            row.reset.Visible := isLocal
             if !visible
                 continue
-            if entry.id = "" {
+            if !isAction {
                 row.categoryTitle.Text := entry.label
                 continue
             }
             row.title.Text := entry.label
-            setting := this.configuration[entry.id]
+            row.primary.Enabled := isLocal
+            row.secondary.Enabled := isLocal
+            setting := isLocal ? this.configuration[entry.id] : entry.setting
             for slot, control in [row.primary, row.secondary] {
                 parsed := Keybindings.Parse(setting.bindings[slot])
                 control.Text := IsObject(parsed) ? parsed.label : "+ add"
             }
-            ; A reset button has no purpose when both bindings match defaults.
-            defaults := this.actions[entry.id].defaults
-            row.reset.Enabled := setting.bindings[1] != defaults[1]
-                || setting.bindings[2] != defaults[2]
+            if isLocal {
+                defaults := this.actions[entry.id].defaults
+                row.reset.Enabled := setting.bindings[1] != defaults[1]
+                    || setting.bindings[2] != defaults[2]
+            }
         }
     }
 
@@ -1205,7 +1317,7 @@ class Keybindings {
     }
 
     _ResetAll(*) {
-        if MsgBox("Reset all visible modules' bindings to defaults?",
+        if MsgBox("Reset all enabled shortcuts for " this.name " to defaults?",
             this.name, "YesNo Icon?") != "Yes"
             return
         configuration := this.GetConfiguration()
@@ -1256,6 +1368,7 @@ class Keybindings {
         if IsObject(this.settings)
             this.settings.Destroy()
         this.settings := 0
+        this.participants := []
         this._RefreshGate()
     }
 
