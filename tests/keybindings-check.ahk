@@ -238,6 +238,33 @@ class KB_Check {
             searched := Keybindings.DisplayRows(participants, "no shortcut")
             this.Assert(searched.Length = 2 && searched[1].ownerId = "fake-peer",
                 "global search finds remote actions")
+            ; Category headings are peers of script headings, not nested inside one.
+            categorized := [{id: "category-test", name: "Category Test", controlReady: true,
+                actions: [
+                    {id: "keys.one", label: "first key", category: "Extra keys",
+                        enabled: true, bindings: ["", ""]},
+                    {id: "tools.one", label: "tool", category: "Utilities",
+                        enabled: true, bindings: ["", ""]},
+                    {id: "keys.two", label: "second key", category: "Extra keys",
+                        enabled: true, bindings: ["", ""]}
+                ]}]
+            categoryRows := Keybindings.DisplayRows(categorized)
+            this.Assert(categoryRows.Length = 5, "each category is a flat heading")
+            this.Assert(categoryRows[1].kind = "owner" && categoryRows[1].label = "Extra keys",
+                "first category uses the normal heading style")
+            this.Assert(categoryRows[2].id = "keys.one" && categoryRows[3].id = "keys.two",
+                "interleaved actions stay grouped by category")
+            this.Assert(categoryRows[4].kind = "owner" && categoryRows[4].label = "Utilities"
+                && categoryRows[5].id = "tools.one", "second category is a normal heading")
+            categorySearch := Keybindings.DisplayRows(categorized, "tool")
+            this.Assert(categorySearch.Length = 2 && categorySearch[1].label = "Utilities",
+                "search preserves the matching category heading")
+            categoryNameSearch := Keybindings.DisplayRows(categorized, "Extra keys")
+            this.Assert(categoryNameSearch.Length = 3 && categoryNameSearch[2].id = "keys.one",
+                "search matches category names")
+            this.Assert(categoryRows[1].ownerId = "category-test"
+                && categoryRows[4].ownerId = "category-test",
+                "flat categories retain their script owner")
             draft := manager.GetConfiguration()
             draft["test.one"].enabled := true
             draft["test.one"].bindings[1] := binding.signature

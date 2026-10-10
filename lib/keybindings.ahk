@@ -454,17 +454,21 @@ class Keybindings {
             "uint", 0x23, "uint", 350, "ptr*", &response, "ptr")
         return !!delivered && response = (challenge ^ 0x4B425031)
     }
-    ; Build one category per owner, regardless of that owner's internal modules.
-    ; External rows are editable only when their owner confirms IPC support.
+    ; Treat each category of a multi-category script as a full heading in the
+    ; unified list. Single-category scripts retain their original script heading.
+    ; Each row still carries the owning script ID for editing and conflict checks.
     static DisplayRows(participants, search := "") {
         rows := []
         search := StrLower(Trim(search))
         for participant in participants {
-            matching := []
+            grouped := Map()
+            categoryOrder := []
+            allCategories := Map()
             for action in participant.actions {
                 ; Module enablement belongs to the owning script.
                 if !action.enabled
                     continue
+                allCategories[action.category] := true
                 searchable := participant.name " " action.id " " action.category " " action.label
                 for encoded in action.bindings {
                     parsed := Keybindings.Parse(encoded)
@@ -473,18 +477,25 @@ class Keybindings {
                 }
                 if search != "" && !InStr(StrLower(searchable), search)
                     continue
-                matching.Push({id: action.id, label: action.label,
+                if !grouped.Has(action.category) {
+                    grouped[action.category] := []
+                    categoryOrder.Push(action.category)
+                }
+                grouped[action.category].Push({id: action.id, label: action.label,
                     ownerId: participant.id, setting: action,
                     editable: (participant.id = participants[1].id || participant.controlReady)})
             }
-            if !matching.Length
+            if !categoryOrder.Length
                 continue
-            heading := participant.name
-            if participant.id != participants[1].id && !participant.controlReady
-                heading .= " (view only)"
-            rows.Push({id: "", label: heading, ownerId: participant.id})
-            for entry in matching
-                rows.Push(entry)
+            for category in categoryOrder {
+                heading := allCategories.Count > 1 ? category : participant.name
+                if participant.id != participants[1].id && !participant.controlReady
+                    heading .= " (view only)"
+                rows.Push({id: "", kind: "owner", label: heading,
+                    ownerId: participant.id})
+                for entry in grouped[category]
+                    rows.Push(entry)
+            }
         }
         return rows
     }

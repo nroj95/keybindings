@@ -18,7 +18,7 @@ try {
     manager.AddAction("preview.one", "sample action", (*) => 0, [""],
         {category: "test"})
     manager.AddAction("preview.two", "another action", (*) => 0, [""],
-        {category: "test"})
+        {category: role = "host" ? "Utilities" : "test"})
     manager.Start()
     Persistent true
     if role = "host"
