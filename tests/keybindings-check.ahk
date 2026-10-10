@@ -62,6 +62,31 @@ class KB_Check {
         this.Assert(Keybindings.Parse("Caps + Shift + J").modifiers = 4, "adapter Shift mask")
         this.Assert(Keybindings.Parse("XButton1").mouse, "ordinary mouse button")
         this.Assert(Keybindings.Parse("WheelUp").wheel, "wheel has complete press events")
+        ; No primary mouse button can be bound, including canonical saved forms.
+        for text in ["LButton", "RButton", "Ctrl + LButton", "Shift + RButton",
+            "normal|0|LButton", "normal|0|RButton"]
+            this.Throws(() => Keybindings.Parse(text),
+                "primary mouse button is reserved: " text)
+        this.Assert(Keybindings._MouseCaptureCancels("LButton"), "left click cancels capture")
+        this.Assert(Keybindings._MouseCaptureCancels("RButton"), "right click cancels capture")
+        this.Assert(!Keybindings._MouseCaptureCancels("MButton"), "middle click is recordable")
+        this.Assert(!Keybindings._MouseCaptureCancels("XButton1"), "side button is recordable")
+        this.Assert(Keybindings.NeedsMouseConfirmation(Keybindings.Parse("MButton")),
+            "bare middle-click requires approval")
+        this.Assert(Keybindings.NeedsMouseConfirmation(Keybindings.Parse("WheelUp")),
+            "bare wheel-up requires approval")
+        this.Assert(Keybindings.NeedsMouseConfirmation(Keybindings.Parse("WheelDown")),
+            "bare wheel-down requires approval")
+        this.Assert(!Keybindings.NeedsMouseConfirmation(Keybindings.Parse("Ctrl + WheelUp")),
+            "modified wheel requires no approval")
+        this.Assert(!Keybindings.NeedsMouseConfirmation(Keybindings.Parse("Alt + MButton")),
+            "modified middle-click requires no approval")
+        this.Assert(!Keybindings.NeedsMouseConfirmation(Keybindings.Parse("XButton1")),
+            "side button requires no approval")
+        this.Assert(!Keybindings.NeedsMouseConfirmation(Keybindings.Parse("Ctrl + XButton1")),
+            "modified side button requires no approval")
+        this.Assert(!Keybindings.NeedsMouseConfirmation(Keybindings.Parse("")),
+            "clearing a shortcut requires no approval")
         this.Assert(Keybindings.Parse("J").signature != Keybindings.Parse("Caps + J").signature,
             "normal and layered bindings have distinct identifiers")
         normalIndex := Map(Keybindings.Parse("J").signature, "normal J")
@@ -181,6 +206,10 @@ class KB_Check {
             this.Assert(participants.Length = 2, "local and running peer discovered")
             this.Assert(participants[1].id = "checks", "local owner listed first")
             this.Assert(participants[1].controlReady, "local owner is control-ready")
+            this.Assert(participants[1].hwnd = A_ScriptHwnd,
+                "local participant publishes its own window")
+            this.Assert(participants[1].pid = DllCall("GetCurrentProcessId", "uint"),
+                "local participant publishes its own process")
             this.Assert(!participants[2].controlReady, "fake owner without HWND is not control-ready")
             this.Assert(participants[1].actions.Length = 2, "local actions included")
             this.Assert(!participants[1].actions[1].enabled, "local disabled state preserved")

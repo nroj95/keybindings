@@ -38,6 +38,29 @@ try {
 
     if original != ""
         throw Error("Preview Peer has an unexpected existing binding.")
+
+    ; A peer that restarted after discovery must not receive the old edit.
+    if !peer.pid || !peer.hwnd
+        throw Error("Preview Peer did not publish a process/window identity.")
+    genuinePid := peer.pid
+    try {
+        peer.pid := genuinePid + 1
+        if probeManager.RequestRemoteSlotEdit(peer, "preview.one", 1, proposed) != 4
+            throw Error("A request from a mismatched peer PID was not rejected.")
+    }
+    finally {
+        peer.pid := genuinePid
+    }
+    genuineHwnd := peer.hwnd
+    try {
+        peer.hwnd := genuineHwnd + 1
+        if probeManager.RequestRemoteSlotEdit(peer, "preview.one", 1, proposed) != 4
+            throw Error("A request from a mismatched peer window was not rejected.")
+    }
+    finally {
+        peer.hwnd := genuineHwnd
+    }
+
     if probeManager.RequestRemoteSlotEdit(peer, "preview.one", 1, proposed) != 1
         throw Error("Owner did not accept the first edit.")
     if probeManager.RequestRemoteSlotEdit(peer, "preview.one", 1, "") != 2

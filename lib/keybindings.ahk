@@ -229,6 +229,8 @@ class Keybindings {
             name: this.name,
             alive: true,
             controlReady: true,
+            hwnd: A_ScriptHwnd,
+            pid: DllCall("GetCurrentProcessId", "uint"),
             actions: this._LocalCatalogSnapshot()
         }]
 
@@ -248,6 +250,8 @@ class Keybindings {
                 name: owner.name,
                 alive: true,
                 controlReady: this._PeerControlReady(owner),
+                hwnd: owner.hwnd,
+                pid: owner.pid,
                 actions: actions
             })
         }
@@ -293,7 +297,12 @@ class Keybindings {
                 break
             }
         }
-        if !IsObject(owner) || !this._PeerControlReady(owner)
+        ; Do not redirect an old UI snapshot to a restarted owner process.
+        if !IsObject(owner) || !HasProp(participant, "pid")
+            || !HasProp(participant, "hwnd")
+            || owner.pid != participant.pid || owner.hwnd != participant.hwnd
+            return 4
+        if !this._PeerControlReady(owner)
             return 4
         ; The sender is identified by its own currently published HWND/PID.
         ; The receiver will check the corresponding live owner manifest.
@@ -614,6 +623,9 @@ class Keybindings {
             }
         }
         key := Keybindings._BaseKey(keyName)
+        ; An accidental global click binding could make Windows unusable.
+        if key.mouse && (key.code = "LButton" || key.code = "RButton")
+            throw ValueError("Left and right mouse buttons cannot be assigned as shortcuts.")
         if layer != "normal" && key.mouse
             throw ValueError("Layer protocol 1 supports keyboard suffixes only. Use an ordinary mouse binding.")
         if (mask = 3 && key.vk = 0x2E) || ((mask & 8) && key.vk = 0x4C)
@@ -626,6 +638,15 @@ class Keybindings {
             wheel: key.wheel, label: prefix key.label,
             signature: layer "|" mask "|" StrLower(key.code)}
     }
+
+    ; Bare middle-button and wheel shortcuts are allowed only after a GUI
+    ; confirmation. Preserve compatibility with deliberate saved bindings.
+    static NeedsMouseConfirmation(binding) {
+        return IsObject(binding) && binding.mouse && binding.modifiers = 0
+            && (binding.key = "MButton" || binding.wheel)
+    }
+
+    static _MouseCaptureCancels(mouseName) => mouseName = "LButton" || mouseName = "RButton"
 
     static _BaseKey(name) {
         if name = "" || StrLen(name) > 32 || RegExMatch(name, "[\s{}&~*$<>!^#+|]")
@@ -1690,6 +1711,12 @@ class Keybindings {
     _RecordMouse(mouseName, *) {
         if !IsObject(this.recording)
             return
+        ; Either primary mouse button is a safe, no-save cancel gesture.
+        ; Handle it before the focus check so clicking outside also cancels.
+        if Keybindings._MouseCaptureCancels(mouseName) {
+            this._EndRecording()
+            return
+        }
         if !WinActive("ahk_id " this.settings.Hwnd) {
             this._EndRecording()
             return
@@ -1733,8 +1760,16 @@ class Keybindings {
         actionId := record.actionId
         slot := record.slot
         remoteParticipantSnapshot := record.participant
-        ; Release the capture mutex and notify peers before sending IPC.
+        ; Release the capture mutex before any confirmation dialog; clicking
+        ; Yes/No must work normally and must not itself become a shortcut.
         this._EndRecording()
+        if Keybindings.NeedsMouseConfirmation(Keybindings.Parse(value)) {
+            answer := MsgBox("An unmodified middle-click or mouse-wheel shortcut can interfere with normal mouse use."
+                . "`n`nAssign it anyway?", this.name " - confirm mouse shortcut",
+                "YesNo Default2 Icon!")
+            if answer != "Yes"
+                return
+        }
         if IsObject(remoteParticipantSnapshot) {
             try {
                 status := this.RequestRemoteSlotEdit(remoteParticipantSnapshot, actionId, slot, value)
