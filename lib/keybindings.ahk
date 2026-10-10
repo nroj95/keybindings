@@ -102,10 +102,17 @@ class Keybindings {
         this.drainCallback := ObjBindMethod(this, "_Drain")
         this.maintenanceCallback := ObjBindMethod(this, "_Maintain")
         this.noticeCallback := ObjBindMethod(this, "_Notice")
+        this.ownerControlCallback := ObjBindMethod(this, "_OwnerControl")
         this.exitCallback := ObjBindMethod(this, "Stop")
         this.message := DllCall("RegisterWindowMessageW", "str",
             "nroj.Keybindings.v1.CaptureChanged", "uint")
         if !this.message
+            throw OSError(A_LastError, "RegisterWindowMessageW")
+        ; Scoped by settings root: separate preview and real registries cannot
+        ; accidentally address each other. This channel is read-only for now.
+        this.ownerControlMessage := DllCall("RegisterWindowMessageW", "str",
+            "nroj.Keybindings.v1.OwnerControl." this.scope, "uint")
+        if !this.ownerControlMessage
             throw OSError(A_LastError, "RegisterWindowMessageW")
         Keybindings.Current := this
     }
@@ -153,6 +160,7 @@ class Keybindings {
         }
         OnExit this.exitCallback
         OnMessage(this.message, this.noticeCallback)
+        OnMessage(this.ownerControlMessage, this.ownerControlCallback)
         this.running := true
         try {
             this._Load()
@@ -192,6 +200,7 @@ class Keybindings {
         this.pressed.Clear()
         this.blocked.Clear()
         try OnMessage(this.message, this.noticeCallback, 0)
+        try OnMessage(this.ownerControlMessage, this.ownerControlCallback, 0)
         try OnExit(this.exitCallback, 0)
         if this.registryMutex
             DllCall("CloseHandle", "ptr", this.registryMutex)
@@ -216,29 +225,60 @@ class Keybindings {
             id: this.id,
             name: this.name,
             alive: true,
+            controlReady: true,
             actions: this._LocalCatalogSnapshot()
         }]
 
+        ; Snapshot files while holding the registry lock. Never send a window
+        ; message while holding that lock: peer operations may need it too.
         previousCritical := this._Lock()
-        try {
-            for owner in this._Owners() {
-                ; Older clients without a catalog are not yet discoverable.
-                if !owner.alive || !owner.document.Has("catalog")
-                    continue
-
-                participants.Push({
-                    id: owner.id,
-                    name: owner.name,
-                    alive: true,
-                    actions: this._PublishedCatalogSnapshot(owner.document)
-                })
-            }
-        }
+        try owners := this._Owners()
         finally this._Unlock(previousCritical)
+
+        for owner in owners {
+            ; Older clients without a catalog remain undiscoverable.
+            if !owner.alive || !owner.document.Has("catalog")
+                continue
+            actions := this._PublishedCatalogSnapshot(owner.document)
+            participants.Push({
+                id: owner.id,
+                name: owner.name,
+                alive: true,
+                controlReady: this._PeerControlReady(owner),
+                actions: actions
+            })
+        }
 
         return participants
     }
 
+    ; Protocol v1, operation 1: a read-only capability handshake. No settings
+    ; are read/written and no user callbacks run in this message handler.
+    _OwnerControl(operation, challenge, messageId, receiverHwnd) {
+        if receiverHwnd != A_ScriptHwnd || messageId != this.ownerControlMessage
+            || operation != 1 || !this.running || this.disposed
+            || challenge < 1 || challenge > 0x7FFFFFFF
+            return 0
+        return challenge ^ 0x4B425031
+    }
+
+    ; Check a manifest's HWND/PID before contacting it. Fail closed for an old
+    ; process, a recycled HWND, a timed-out process, or a non-cooperating owner.
+    ; This probe is not an authorization token for future write requests.
+    _PeerControlReady(owner) {
+        if !owner.alive || !owner.hwnd || !owner.pid
+            return false
+        peerPid := 0
+        if !DllCall("GetWindowThreadProcessId", "ptr", owner.hwnd,
+            "uint*", &peerPid, "uint") || peerPid != owner.pid
+            return false
+        challenge := Random(1, 0x7FFFFFFF)
+        response := 0
+        delivered := DllCall("SendMessageTimeoutW", "ptr", owner.hwnd,
+            "uint", this.ownerControlMessage, "uptr", 1, "ptr", challenge,
+            "uint", 0x23, "uint", 350, "ptr*", &response, "ptr")
+        return !!delivered && response = (challenge ^ 0x4B425031)
+    }
     ; Build one category per owner, regardless of that owner's internal modules.
     ; External rows remain read-only until owner-mediated updates are implemented.
     static DisplayRows(participants, search := "") {

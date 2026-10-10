@@ -142,9 +142,21 @@ class KB_Check {
                 "str", manager._OwnerMutexName("fake-peer"), "ptr")
             this.Assert(fakeMutex != 0, "fake peer presence signal")
             this.Assert(manager._OwnerAlive("fake-peer"), "running owner is detected")
+            this.Assert(manager._OwnerControl(1, 12345, manager.ownerControlMessage,
+                A_ScriptHwnd) = (12345 ^ 0x4B425031), "valid owner control probe")
+            this.Assert(manager._OwnerControl(2, 12345, manager.ownerControlMessage,
+                A_ScriptHwnd) = 0, "unknown owner control operation rejected")
+            this.Assert(manager._OwnerControl(1, 0, manager.ownerControlMessage,
+                A_ScriptHwnd) = 0, "invalid owner control challenge rejected")
+            this.Assert(manager._OwnerControl(1, 12345, manager.ownerControlMessage,
+                0) = 0, "wrong receiver window rejected")
+            this.Assert(!manager._PeerControlReady({alive: true, hwnd: 0, pid: 0}),
+                "peer probe rejects missing identity")
             participants := manager.DiscoverParticipants()
             this.Assert(participants.Length = 2, "local and running peer discovered")
             this.Assert(participants[1].id = "checks", "local owner listed first")
+            this.Assert(participants[1].controlReady, "local owner is control-ready")
+            this.Assert(!participants[2].controlReady, "fake owner without HWND is not control-ready")
             this.Assert(participants[1].actions.Length = 2, "local actions included")
             this.Assert(!participants[1].actions[1].enabled, "local disabled state preserved")
             this.Assert(participants[2].name = "Jørn – テスト", "peer name preserved")
