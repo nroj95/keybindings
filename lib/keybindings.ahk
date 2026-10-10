@@ -2,7 +2,7 @@
 
 ; =============================================================================
 ; keybindings.ahk - reusable, opt-in keybinding manager for AutoHotkey v2
-; version: 0.2.0-preview.5 | settings/registry schema: 1 | layer protocol: 1
+; version: 0.2.0-preview.6 | settings/registry schema: 1 | layer protocol: 1
 ; =============================================================================
 ; responsibilities
 ;   - give actions stable IDs, two editable binding slots and one saved setup.
@@ -42,7 +42,7 @@
 ; =============================================================================
 
 class Keybindings {
-    static Version := "0.2.0-preview.5"
+    static Version := "0.2.0-preview.6"
     static Current := 0
 
     __New(ownerId, displayName, options := {}) {

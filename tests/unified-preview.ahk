@@ -9,9 +9,12 @@ try {
     role := A_Args.Length ? StrLower(A_Args[1]) : "host"
     if role != "host" && role != "peer"
         throw ValueError("Use host or peer.")
-    root := A_Temp "\nroj-keybindings-unified-preview"
-    manager := Keybindings("unified-preview-" role,
-        role = "host" ? "Preview Host" : "Preview Peer", {directory: root})
+    ; Optional second argument isolates integration tests from normal previews.
+    root := A_Args.Length >= 2 ? A_Args[2] : A_Temp "\nroj-keybindings-unified-preview"
+    displayName := role = "host" ? "Preview Host" : "Preview Peer"
+    if A_Args.Length >= 2
+        displayName .= " [Restart Test]"
+    manager := Keybindings("unified-preview-" role, displayName, {directory: root})
     manager.AddAction("preview.one", "sample action", (*) => 0, [""],
         {category: "test"})
     manager.AddAction("preview.two", "another action", (*) => 0, [""],
