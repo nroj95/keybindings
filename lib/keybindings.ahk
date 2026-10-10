@@ -446,7 +446,7 @@ class Keybindings {
         return !!delivered && response = (challenge ^ 0x4B425031)
     }
     ; Build one category per owner, regardless of that owner's internal modules.
-    ; External rows remain read-only until owner-mediated updates are implemented.
+    ; External rows are editable only when their owner confirms IPC support.
     static DisplayRows(participants, search := "") {
         rows := []
         search := StrLower(Trim(search))
@@ -465,12 +465,13 @@ class Keybindings {
                 if search != "" && !InStr(StrLower(searchable), search)
                     continue
                 matching.Push({id: action.id, label: action.label,
-                    ownerId: participant.id, setting: action})
+                    ownerId: participant.id, setting: action,
+                    editable: (participant.id = participants[1].id || participant.controlReady)})
             }
             if !matching.Length
                 continue
             heading := participant.name
-            if participant.id != participants[1].id
+            if participant.id != participants[1].id && !participant.controlReady
                 heading .= " (view only)"
             rows.Push({id: "", label: heading, ownerId: participant.id})
             for entry in matching
@@ -1483,7 +1484,9 @@ class Keybindings {
             entry := visible ? this.rows[position] : 0
             isAction := visible && entry.id != ""
             isLocal := isAction && entry.ownerId = this.id
-            row.actionId := isLocal ? entry.id : ""
+            editable := isAction && entry.editable
+            row.actionId := editable ? entry.id : ""
+            row.ownerId := isAction ? entry.ownerId : ""
             row.title.Visible := isAction
             row.categoryTitle.Visible := visible && !isAction
             row.primary.Visible := isAction
@@ -1496,8 +1499,8 @@ class Keybindings {
                 continue
             }
             row.title.Text := entry.label
-            row.primary.Enabled := isLocal
-            row.secondary.Enabled := isLocal
+            row.primary.Enabled := editable
+            row.secondary.Enabled := editable
             setting := isLocal ? this.configuration[entry.id] : entry.setting
             for slot, control in [row.primary, row.secondary] {
                 parsed := Keybindings.Parse(setting.bindings[slot])
@@ -1588,6 +1591,17 @@ class Keybindings {
         actionId := this.visibleRows[index].actionId
         if actionId = ""
             return
+        remoteParticipantSnapshot := 0
+        if this.visibleRows[index].ownerId != this.id {
+            for participantEntry in this.participants {
+                if participantEntry.id = this.visibleRows[index].ownerId {
+                    remoteParticipantSnapshot := participantEntry
+                    break
+                }
+            }
+            if !IsObject(remoteParticipantSnapshot) || !remoteParticipantSnapshot.controlReady
+                return
+        }
         captureMutex := DllCall("CreateMutexW", "ptr", 0, "int", false,
             "str", this.mutexPrefix ".Capture", "ptr")
         mutexError := A_LastError
@@ -1599,6 +1613,7 @@ class Keybindings {
         }
         record := {mutex: captureMutex, window: 0, hook: 0, peers: [],
             pending: "", pendingKey: "", clearing: false, actionId: actionId, slot: slot,
+            participant: remoteParticipantSnapshot,
             finish: ObjBindMethod(this, "_FinishRecordedKey"),
             timeout: ObjBindMethod(this, "_RecordingTimedOut")}
         this.recording := record
@@ -1717,7 +1732,32 @@ class Keybindings {
         value := record.clearing ? "" : record.pending
         actionId := record.actionId
         slot := record.slot
+        remoteParticipantSnapshot := record.participant
+        ; Release the capture mutex and notify peers before sending IPC.
         this._EndRecording()
+        if IsObject(remoteParticipantSnapshot) {
+            try {
+                status := this.RequestRemoteSlotEdit(remoteParticipantSnapshot, actionId, slot, value)
+                if status = 1 || status = 6 {
+                    this._RefreshParticipants()
+                    return
+                }
+                switch status {
+                    case 2: message := "The shortcut changed in " remoteParticipantSnapshot.name
+                        . " since the list was refreshed. Please try again."
+                    case 3: message := "The owning script rejected this shortcut, possibly due to a conflict."
+                    case 4: message := "The owning script is no longer available or did not respond."
+                    default: message := "The owning script could not complete the edit (code " status ")."
+                }
+                this._RefreshParticipants()
+                MsgBox(message, this.name " - shortcut not changed", "Icon!")
+            }
+            catch Error as remoteCaptureEditError {
+                this._RefreshParticipants()
+                MsgBox(remoteCaptureEditError.Message, this.name " - remote edit failed", "Icon!")
+            }
+            return
+        }
         configuration := this.GetConfiguration()
         configuration[actionId].bindings[slot] := value
         this._SaveConfiguration(configuration)

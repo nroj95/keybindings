@@ -197,7 +197,14 @@ class KB_Check {
             this.Assert(displayed.Length = 5, "enabled actions grouped by script")
             this.Assert(displayed[1].label = "keybindings checks", "local script header")
             this.Assert(displayed[3].label = "Jørn – テスト (view only)", "remote header is read-only")
+            this.Assert(displayed[2].editable, "local action remains editable")
+            this.Assert(!displayed[4].editable, "legacy peer is view-only")
             this.Assert(displayed[4].id = "peer.bound", "remote action visible")
+            participants[2].controlReady := true
+            readyRows := Keybindings.DisplayRows(participants)
+            this.Assert(readyRows[3].label = "Jørn – テスト", "ready peer title has no view-only suffix")
+            this.Assert(readyRows[4].editable, "ready peer actions are editable")
+            participants[2].controlReady := false
             this.Assert(displayed[5].setting.bindings[1] = "", "unassigned action visible")
             searched := Keybindings.DisplayRows(participants, "no shortcut")
             this.Assert(searched.Length = 2 && searched[1].ownerId = "fake-peer",
