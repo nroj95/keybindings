@@ -150,6 +150,31 @@ class KB_Check {
                 A_ScriptHwnd) = 0, "invalid owner control challenge rejected")
             this.Assert(manager._OwnerControl(1, 12345, manager.ownerControlMessage,
                 0) = 0, "wrong receiver window rejected")
+            this.Assert(manager._ApplyRemoteSlotCAS("not-an-action", 1, false, "", "") = 4,
+                "remote edit rejects unknown action")
+            this.Assert(manager._ApplyRemoteSlotCAS("test.one", 9, false, "", "") = 4,
+                "remote edit rejects invalid slot")
+            this.Assert(manager._ApplyRemoteSlotCAS("test.one", 1, true, "", Keybindings.Parse("Caps + J").signature) = 2,
+                "remote edit rejects stale enabled state")
+            this.Assert(manager._ApplyRemoteSlotCAS("test.one", 1, false, "", Keybindings.Parse("Caps + J").signature) = 1,
+                "remote edit updates disabled action without installing hotkey")
+            this.Assert(manager.GetConfiguration()["test.one"].bindings[1]
+                = Keybindings.Parse("Caps + J").signature, "remote edit stored normalized shortcut")
+            this.Assert(manager._ApplyRemoteSlotCAS("test.one", 1, false, "", Keybindings.Parse("Caps + K").signature) = 2,
+                "remote edit rejects stale slot")
+            this.Assert(manager._ApplyRemoteSlotCAS("test.one", 1, false,
+                Keybindings.Parse("Caps + J").signature, "") = 1,
+                "remote edit can clear its own changed shortcut")
+            this.Assert(manager.GetConfiguration()["test.one"].bindings[1] = "",
+                "remote edit reverted test action")
+            this.Assert(manager._ApplyRemoteSlotCAS("test.one", 1, false, "", "") = 6,
+                "remote edit detects unchanged binding")
+            this.Assert(manager._ApplyRemoteSlotCAS("test.one", 1, false,
+                "", "invalid!!") = 4, "remote edit rejects invalid replacement")
+            this.Assert(manager._ApplyRemoteSlotCAS("test.one", 1, false,
+                "Caps + J", "") = 4, "remote edit rejects noncanonical expected binding")
+            this.Assert(manager.GetConfiguration()["test.one"].bindings[1] = "",
+                "invalid requests leave saved binding unchanged")
             this.Assert(!manager._PeerControlReady({alive: true, hwnd: 0, pid: 0}),
                 "peer probe rejects missing identity")
             participants := manager.DiscoverParticipants()
@@ -165,6 +190,9 @@ class KB_Check {
                 "peer shortcut preserved")
             this.Assert(participants[2].actions[2].bindings[1] = "",
                 "unassigned peer action included")
+            this.Assert(manager.RequestRemoteSlotEdit(
+                participants[2], "peer.empty", 1, "") = 4,
+                "unchanged snapshot cannot bypass owner verification")
             displayed := Keybindings.DisplayRows(participants)
             this.Assert(displayed.Length = 5, "enabled actions grouped by script")
             this.Assert(displayed[1].label = "keybindings checks", "local script header")

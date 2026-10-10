@@ -103,6 +103,7 @@ class Keybindings {
         this.maintenanceCallback := ObjBindMethod(this, "_Maintain")
         this.noticeCallback := ObjBindMethod(this, "_Notice")
         this.ownerControlCallback := ObjBindMethod(this, "_OwnerControl")
+        this.remoteEditCallback := ObjBindMethod(this, "_ReceiveRemoteEdit")
         this.exitCallback := ObjBindMethod(this, "Stop")
         this.message := DllCall("RegisterWindowMessageW", "str",
             "nroj.Keybindings.v1.CaptureChanged", "uint")
@@ -161,6 +162,7 @@ class Keybindings {
         OnExit this.exitCallback
         OnMessage(this.message, this.noticeCallback)
         OnMessage(this.ownerControlMessage, this.ownerControlCallback)
+        OnMessage(0x004A, this.remoteEditCallback) ; WM_COPYDATA
         this.running := true
         try {
             this._Load()
@@ -201,6 +203,7 @@ class Keybindings {
         this.blocked.Clear()
         try OnMessage(this.message, this.noticeCallback, 0)
         try OnMessage(this.ownerControlMessage, this.ownerControlCallback, 0)
+        try OnMessage(0x004A, this.remoteEditCallback, 0)
         try OnExit(this.exitCallback, 0)
         if this.registryMutex
             DllCall("CloseHandle", "ptr", this.registryMutex)
@@ -252,6 +255,169 @@ class Keybindings {
         return participants
     }
 
+    ; Cooperative same-user IPC, protocol v1. Return codes:
+    ;   1 updated, 2 stale, 3 conflict/rejected binding, 4 unavailable,
+    ;   5 unexpected failure, 6 already set.
+    ; Only the owner commits; an external process never writes its INI file.
+    ; v1 edits one enabled or disabled action slot, not module enablement.
+    RequestRemoteSlotEdit(participant, actionId, slot, replacement) {
+        if !this.running || this.disposed || this.applying || IsObject(this.recording)
+            throw Error("Keybindings is not ready for remote editing.")
+        if !IsObject(participant) || participant.id = this.id
+            throw ValueError("A different running owner is required.")
+        Keybindings.Id(participant.id)
+        Keybindings.Id(actionId)
+        if slot != 1 && slot != 2
+            throw ValueError("Slot must be 1 or 2.")
+
+        oldAction := 0
+        for action in participant.actions {
+            if action.id = actionId {
+                oldAction := action
+                break
+            }
+        }
+        if !IsObject(oldAction)
+            throw ValueError("Action was not found in the displayed participant snapshot.")
+        proposed := Keybindings.Parse(replacement)
+        newSignature := IsObject(proposed) ? proposed.signature : ""
+        expectedSignature := oldAction.bindings[slot]
+        ; Never contact another process while holding the registry lock.
+        previousCritical := this._Lock()
+        try owners := this._Owners()
+        finally this._Unlock(previousCritical)
+        owner := 0
+        for entry in owners {
+            if entry.id = participant.id {
+                owner := entry
+                break
+            }
+        }
+        if !IsObject(owner) || !this._PeerControlReady(owner)
+            return 4
+        ; The sender is identified by its own currently published HWND/PID.
+        ; The receiver will check the corresponding live owner manifest.
+        payload := "KBEDIT1`t" this.id "`t" owner.id "`t" actionId "`t" slot
+            . "`t" (oldAction.enabled ? "1" : "0") "`t" expectedSignature "`t" newSignature
+        if StrLen(payload) > 900
+            return 4
+        data := Buffer(StrPut(payload, "UTF-16") * 2, 0)
+        written := StrPut(payload, data, "UTF-16")
+        copyData := Buffer(A_PtrSize * 3, 0)
+        NumPut("UPtr", 0x4B425731, copyData, 0) ; KBW1
+        NumPut("UInt", written * 2, copyData, A_PtrSize)
+        NumPut("Ptr", data.Ptr, copyData, A_PtrSize * 2)
+        response := 0
+        delivered := DllCall("SendMessageTimeoutW", "ptr", owner.hwnd,
+            "uint", 0x004A, "ptr", A_ScriptHwnd, "ptr", copyData.Ptr,
+            "uint", 0x23, "uint", 1500, "ptr*", &response, "ptr")
+        ; A timeout is ambiguous: the owner might still complete the edit.
+        ; Do NOT retry automatically; refresh the participants first.
+        if !delivered
+            return 4
+        return response >= 1 && response <= 6 ? response : 5
+    }
+
+    _ReceiveRemoteEdit(senderHwnd, lParam, messageId, receiverHwnd) {
+        if receiverHwnd != A_ScriptHwnd || messageId != 0x004A
+            return
+        if !this.running || this.disposed || this.applying || IsObject(this.recording)
+            return 4
+        if !lParam || NumGet(lParam, 0, "UPtr") != 0x4B425731
+            return
+        byteCount := NumGet(lParam, A_PtrSize, "UInt")
+        textPtr := NumGet(lParam, A_PtrSize * 2, "Ptr")
+        if byteCount < 2 || byteCount > 2048 || Mod(byteCount, 2) || !textPtr
+            return 4
+        try {
+            payload := StrGet(textPtr, byteCount // 2, "UTF-16")
+            fields := StrSplit(payload, "`t")
+            if fields.Length != 8 || fields[1] != "KBEDIT1" || fields[3] != this.id
+                return 4
+            Keybindings.Id(fields[2])
+            Keybindings.Id(fields[4])
+            if fields[5] != "1" && fields[5] != "2"
+                return 4
+            if fields[6] != "0" && fields[6] != "1"
+                return 4
+            ; The registry owner identity and the sender window PID must match.
+            ; An arbitrary HWND or a stale/reused process window is rejected.
+            if !this._RemoteEditSenderValid(senderHwnd, fields[2])
+                return 4
+            return this._ApplyRemoteSlotCAS(fields[4], Integer(fields[5]),
+                fields[6] = "1", fields[7], fields[8])
+        }
+        catch Error as remoteError {
+            this._Report("remote edit rejected: " remoteError.Message)
+            return 5
+        }
+    }
+
+    _RemoteEditSenderValid(senderHwnd, senderId) {
+        if !senderHwnd || senderId = this.id
+            return false
+        processPid := 0
+        if !DllCall("GetWindowThreadProcessId", "ptr", senderHwnd,
+            "uint*", &processPid, "uint") || !processPid
+            return false
+        previousCritical := this._Lock()
+        try owners := this._Owners()
+        finally this._Unlock(previousCritical)
+        for owner in owners
+            if owner.id = senderId && owner.alive
+                && owner.hwnd = senderHwnd && owner.pid = processPid
+                return true
+        return false
+    }
+
+    ; Expected current slot and enabled state form a compare-and-swap guard.
+    ; Edit the current live configuration (not a stale whole-file snapshot).
+    _ApplyRemoteSlotCAS(actionId, slot, expectedEnabled, expectedSignature, replacement) {
+        if !this.running || this.disposed || this.applying
+            return 4
+        if !this.actions.Has(actionId) || (slot != 1 && slot != 2)
+            return 4
+        try {
+            ; Malformed input is an invalid request, not an internal failure.
+            try {
+                previous := Keybindings.Parse(expectedSignature)
+                proposed := Keybindings.Parse(replacement)
+            }
+            catch Error {
+                return 4
+            }
+            previousValue := IsObject(previous) ? previous.signature : ""
+            proposedValue := IsObject(proposed) ? proposed.signature : ""
+            if previousValue != expectedSignature || proposedValue != replacement
+                return 4
+            current := this.configuration[actionId]
+            if current.enabled != expectedEnabled || current.bindings[slot] != expectedSignature
+                return 2
+            if expectedSignature = replacement
+                return 6
+            updated := this.GetConfiguration()
+            updated[actionId].bindings[slot] := replacement
+            ; Saved-conflict approval is deliberately unsupported over IPC.
+            ; The owner must reject it instead of silently overriding a warning.
+            try this.Apply(updated)
+            catch KB_SavedConflict as savedConflict {
+                this._Report("remote edit refused: " savedConflict.Message)
+                return 3
+            }
+            catch Error as rejectedEdit {
+                this._Report("remote edit refused: " rejectedEdit.Message)
+                return 3
+            }
+            this._Report("keybinding changes saved")
+            if IsObject(this.settings)
+                this._RenderSettings()
+            return 1
+        }
+        catch Error as unexpectedError {
+            this._Report("remote edit error: " unexpectedError.Message)
+            return 5
+        }
+    }
     ; Protocol v1, operation 1: a read-only capability handshake. No settings
     ; are read/written and no user callbacks run in this message handler.
     _OwnerControl(operation, challenge, messageId, receiverHwnd) {
